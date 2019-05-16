@@ -136,6 +136,7 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
   size_t authfile_dir_len;
   int pgu_ret, gpn_ret;
   int retval = PAM_IGNORE;
+  char *ssh_agent_socket_name = NULL;
   device_t *devices = NULL;
   unsigned n_devices = 0;
   int openasuser;
@@ -324,7 +325,18 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     }
   }
 
-  if (cfg->manual == 0) {
+  // Use SSH agent if defined
+  ssh_agent_socket_name = getenv("SSH_AUTH_SOCK");
+  
+  if (ssh_agent_socket_name != NULL) {
+    if (cfg->interactive) {
+      converse(pamh, PAM_PROMPT_ECHO_ON,
+               cfg->prompt != NULL ? cfg->prompt : DEFAULT_PROMPT);
+    }
+    
+    retval = do_agent_authentication(ssh_agent_socket_name, cfg, devices, n_devices, pamh);
+  }
+  else if (cfg->manual == 0) {
     if (cfg->interactive) {
       converse(pamh, PAM_PROMPT_ECHO_ON,
                cfg->prompt != NULL ? cfg->prompt : DEFAULT_PROMPT);

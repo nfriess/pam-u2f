@@ -15,8 +15,17 @@
 #include <pwd.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <arpa/inet.h>
 
 #include <string.h>
+
+#define AGENT_BUF_LEN                 4096
+#define SSH_REQUEST_U2F_AUTHENTICATE  41
+#define SSH_AGENT_FAILURE             5
+#define SSH_AGENT_SUCCESS             6
 
 int get_devices_from_authfile(const char *authfile, const char *username,
                               unsigned max_devs, int verbose, FILE *debug_file,
@@ -538,6 +547,266 @@ char *converse(pam_handle_t *pamh, int echocode, const char *prompt) {
   }
 
   return ret;
+}
+
+static int send_agent_challenge(const cfg_t *cfg, const int socket_fd,
+				const char *origin, const char *challenge,
+				char **response) {
+
+  char agent_buffer[AGENT_BUF_LEN];
+  uint32_t agent_buffer_len;
+  unsigned char message_type;
+  uint32_t origin_len;
+  uint32_t challenge_len;
+  uint32_t response_len;
+  uint32_t be_value;
+  ssize_t count;
+  size_t nread;
+
+  origin_len = (uint32_t) strlen(origin);
+  challenge_len = (uint32_t) strlen(challenge);
+
+  agent_buffer_len = origin_len + challenge_len +
+    (uint32_t)(2*sizeof(uint32_t) + sizeof(unsigned char));
+  
+  if (agent_buffer_len > AGENT_BUF_LEN - sizeof(uint32_t)) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Authenticate origin + challenge string too long");
+    return -2;
+  }
+
+  message_type = SSH_REQUEST_U2F_AUTHENTICATE;
+
+  be_value = htonl(agent_buffer_len);
+  memcpy(agent_buffer, &be_value, sizeof(uint32_t));
+  
+  memcpy(agent_buffer + sizeof(uint32_t), &message_type, sizeof(unsigned char));
+
+  be_value = htonl(origin_len);
+  memcpy(agent_buffer + sizeof(uint32_t) + sizeof(unsigned char), &be_value, sizeof(uint32_t));
+  memcpy(agent_buffer + 2*sizeof(uint32_t) + sizeof(unsigned char), origin, origin_len);
+  
+  be_value = htonl(challenge_len);
+  memcpy(agent_buffer + 2*sizeof(uint32_t) + sizeof(unsigned char) + origin_len,
+	 &be_value, sizeof(uint32_t));
+  memcpy(agent_buffer + 3*sizeof(uint32_t) + sizeof(unsigned char) + origin_len,
+	 challenge, challenge_len);
+  
+  count = write(socket_fd, agent_buffer, agent_buffer_len + sizeof(uint32_t));
+  if (count < 0) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Unable to write to SSH agent: %s",
+	strerror(errno));
+    return -2;
+  }
+  else if (count < (ssize_t)agent_buffer_len + (ssize_t)sizeof(uint32_t)) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Short write while communicating with SSH agent: %d", count);
+    return -2;
+  }
+
+  count = read(socket_fd, &be_value, sizeof(uint32_t));
+  if (count < 0) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Unable to read from SSH agent: %s", strerror(errno));
+    return -2;
+  }
+  else if (count < (ssize_t)sizeof(uint32_t)) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Short read while communicating with SSH agent: %d", count);
+    return -2;
+  }
+
+  agent_buffer_len = ntohl(be_value);
+
+  if (agent_buffer_len < sizeof(unsigned char) + sizeof(uint32_t)) {
+    if (cfg->debug)
+      D(cfg->debug_file, "SSH agent data too short: %d but expected at least %ld",
+	agent_buffer_len, sizeof(unsigned char) + sizeof(uint32_t));
+    return -2;
+  }
+  
+  nread = 0;
+  while (nread < agent_buffer_len) {
+    
+    count = read(socket_fd, agent_buffer + nread, agent_buffer_len - nread);
+    if (count < 0) {
+      if (cfg->debug)
+	D(cfg->debug_file, "Unable to read from SSH agent: %s", strerror(errno));
+      return -2;
+    }
+
+    nread += (size_t)count;
+  }
+
+  memcpy(&message_type, agent_buffer, sizeof(unsigned char));
+
+  if (message_type == SSH_AGENT_FAILURE) {
+    if (cfg->debug)
+      D(cfg->debug_file, "SSH agent returned failure: %s", strerror(errno));
+    return -2;
+  }
+  else if (message_type != SSH_AGENT_SUCCESS) {
+    if (cfg->debug)
+      D(cfg->debug_file, "SSH agent returned unknown response: %d", message_type);
+    return -2;
+  }
+
+  memcpy(&be_value, agent_buffer + sizeof(unsigned char), sizeof(uint32_t));
+  response_len = ntohl(be_value);
+
+  if (agent_buffer_len < sizeof(unsigned char) + sizeof(uint32_t) + response_len) {
+    if (cfg->debug)
+      D(cfg->debug_file, "SSH agent data too short: %d but expected %ld",
+	agent_buffer_len, sizeof(unsigned char) + sizeof(uint32_t) + response_len);
+    return -2;
+  }
+
+  *response = malloc(response_len + 1);
+  if (!(*response)) {
+    D(cfg->debug_file, "Malloc failed");
+    return -2;
+  }
+
+  (*response)[response_len] = 0;
+
+  memcpy(*response, agent_buffer + sizeof(unsigned char) + sizeof(uint32_t),
+	 response_len);
+
+
+  return 0;
+}
+
+int do_agent_authentication(const char *ssh_agent_socket_name,
+			    const cfg_t *cfg, const device_t *devices,
+			    const unsigned n_devs, pam_handle_t *pamh) {
+  int socket_fd = 0;
+  struct sockaddr_un addr;
+  u2fs_ctx_t *ctx = NULL;
+  u2fs_auth_res_t *auth_result;
+  u2fs_rc s_rc;
+  char *response = NULL;
+  char *challenge = NULL;
+  int retval = -2;
+  int cued = 0;
+  unsigned int i;
+
+  socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (socket_fd == -1) {
+    D(cfg->debug_file, "Unable to open socket: %s",
+      strerror(errno));
+    return retval;
+  }
+
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, ssh_agent_socket_name, sizeof(addr.sun_path)-1);
+
+  if (connect(socket_fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Unable to connect to SSH agent socket: %s",
+	strerror(errno));
+    return retval;
+  }
+
+  s_rc = u2fs_global_init(cfg->debug ? U2FS_DEBUG : 0);
+  if (s_rc != U2FS_OK) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Unable to initialize libu2f-server: %s", u2fs_strerror(s_rc));
+    goto done;
+  }
+  s_rc = u2fs_init(&ctx);
+  if (s_rc != U2FS_OK) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Unable to initialize libu2f-server context: %s", u2fs_strerror(s_rc));
+    goto done;
+  }
+
+  if ((s_rc = u2fs_set_origin(ctx, cfg->origin)) != U2FS_OK) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Unable to set origin: %s", u2fs_strerror(s_rc));
+    goto done;
+  }
+
+  if ((s_rc = u2fs_set_appid(ctx, cfg->appid)) != U2FS_OK) {
+    if (cfg->debug)
+      D(cfg->debug_file, "Unable to set appid: %s", u2fs_strerror(s_rc));
+    goto done;
+  }
+
+  if (cfg->nodetect && cfg->debug)
+    D(cfg->debug_file, "nodetect option specified, suitable key detection will be skipped");
+
+  for (i = 0; i < n_devs; i++) {
+
+    retval = -2;
+
+    if (cfg->debug)
+      D(cfg->debug_file, "Attempting authentication with device number %d", i + 1);
+
+    if ((s_rc = u2fs_set_keyHandle(ctx, devices[i].keyHandle)) != U2FS_OK) {
+      if (cfg->debug)
+        D(cfg->debug_file, "Unable to set keyHandle: %s", u2fs_strerror(s_rc));
+      goto done;
+    }
+
+    if ((s_rc = u2fs_set_publicKey(ctx, devices[i].publicKey)) != U2FS_OK) {
+      if (cfg->debug)
+        D(cfg->debug_file, "Unable to set publicKey %s", u2fs_strerror(s_rc));
+      goto done;
+    }
+
+    if ((s_rc = u2fs_authentication_challenge(ctx, &challenge)) != U2FS_OK) {
+      if (cfg->debug)
+        D(cfg->debug_file, "Unable to produce authentication challenge: %s",
+           u2fs_strerror(s_rc));
+      free(challenge);
+      challenge = NULL;
+      goto done;
+    }
+
+    if (cfg->debug)
+      D(cfg->debug_file, "Challenge: %s", challenge);
+
+    // TODO: How to deal with nodetect?
+    
+    if (cfg->manual == 0 && cfg->cue && !cued) {
+      cued = 1;
+      converse(pamh, PAM_TEXT_INFO, DEFAULT_CUE);
+    }
+
+    retval = -1;
+
+    if (send_agent_challenge(cfg, socket_fd, cfg->origin, challenge, &response)) {
+      free(challenge);
+      challenge = NULL;
+      return retval;
+    }
+
+    free(challenge);
+    challenge = NULL;
+
+    if (cfg->debug)
+      D(cfg->debug_file, "Response: %s", response);
+
+    s_rc = u2fs_authentication_verify(ctx, response, &auth_result);
+    u2fs_free_auth_res(auth_result);
+
+    if (s_rc == U2FS_OK) {
+      retval = 1;
+      break;
+    }
+
+  }
+
+ done:
+
+  if (ctx)
+    u2fs_done(ctx);
+  u2fs_global_done();
+  close(socket_fd);
+  
+  return retval;
 }
 
 #if defined(PAM_DEBUG)
