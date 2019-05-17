@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <security/pam_appl.h>
 
+#include "config.h"
+
 #define BUFSIZE 1024
 #define MAX_DEVS 24
 #define PK_LEN 130 // Public key
@@ -62,9 +64,11 @@ int do_authentication(const cfg_t *cfg, const device_t *devices,
                       const unsigned n_devs, pam_handle_t *pamh);
 int do_manual_authentication(const cfg_t *cfg, const device_t *devices,
                              const unsigned n_devs, pam_handle_t *pamh);
+char *converse(pam_handle_t *pamh, int echocode, const char *prompt);
+#ifdef ENABLE_SSH_AGENT_FORWARD
 int do_agent_authentication(const char *ssh_agent_socket_name,
 			    const cfg_t *cfg, const device_t *devices,
 			    const unsigned n_devs, pam_handle_t *pamh);
-char *converse(pam_handle_t *pamh, int echocode, const char *prompt);
+#endif
 void _debug(FILE *, const char *, int, const char *, const char *, ...);
 #endif /* UTIL_H */

@@ -52,6 +52,17 @@ AC_ARG_WITH(pam-dir,
 ])
 AC_SUBST(PAMDIR, "$PAMDIR")
 
+AC_ARG_ENABLE(ssh-agent-forward,
+    AC_HELP_STRING([--enable-ssh-agent-forward],
+                   [enable forwarding of u2f requests through SSH Agent]),
+    enable_ssh_agent_forward=$enableval)
+if test x"$enable_ssh_agent_forward" = x"yes"; then
+   AC_DEFINE(ENABLE_SSH_AGENT_FORWARD, 1,
+             [If defined then U2F calls will be forwarded through a compatible
+              SSH Agent, if present])
+fi
+
+
 
 PKG_CHECK_MODULES([LIBU2FHOST], [u2f-host], [], [])
 PKG_CHECK_MODULES([LIBU2FSERVER], [u2f-server], [], [])
@@ -83,6 +94,7 @@ AX_CHECK_COMPILE_FLAG([-Wpointer-arith], [CWFLAGS="$CWFLAGS -Wpointer-arith"])
 AC_ARG_VAR([CSFLAGS], [Warning suppression flags])
 AX_CHECK_COMPILE_FLAG([-Wno-unused-but-set-variable], [CSFLAGS="-Wno-unused-but-set-variable"])
 
+AC_CONFIG_HEADER([config.h])
 AC_CONFIG_FILES([
   Makefile
   pamu2fcfg/Makefile

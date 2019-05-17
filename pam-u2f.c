@@ -5,6 +5,8 @@
 /* Define which PAM interfaces we provide */
 #define PAM_SM_AUTH
 
+#include "config.h"
+
 /* Include PAM headers */
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
@@ -136,7 +138,9 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
   size_t authfile_dir_len;
   int pgu_ret, gpn_ret;
   int retval = PAM_IGNORE;
+#ifdef ENABLE_SSH_AGENT_FORWARD
   char *ssh_agent_socket_name = NULL;
+#endif
   device_t *devices = NULL;
   unsigned n_devices = 0;
   int openasuser;
@@ -325,6 +329,7 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     }
   }
 
+#ifdef ENABLE_SSH_AGENT_FORWARD
   // Use SSH agent if defined
   ssh_agent_socket_name = getenv("SSH_AUTH_SOCK");
   
@@ -336,7 +341,10 @@ int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
     
     retval = do_agent_authentication(ssh_agent_socket_name, cfg, devices, n_devices, pamh);
   }
-  else if (cfg->manual == 0) {
+  else
+#endif /* ENABLE_SSH_AGENT_FORWARD */
+
+  if (cfg->manual == 0) {
     if (cfg->interactive) {
       converse(pamh, PAM_PROMPT_ECHO_ON,
                cfg->prompt != NULL ? cfg->prompt : DEFAULT_PROMPT);

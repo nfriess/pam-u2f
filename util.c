@@ -15,17 +15,21 @@
 #include <pwd.h>
 #include <errno.h>
 #include <unistd.h>
+
+#include <string.h>
+
+
+#ifdef ENABLE_SSH_AGENT_FORWARD
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <arpa/inet.h>
 
-#include <string.h>
-
 #define AGENT_BUF_LEN                 4096
 #define SSH_REQUEST_U2F_AUTHENTICATE  41
 #define SSH_AGENT_FAILURE             5
 #define SSH_AGENT_SUCCESS             6
+#endif /* ENABLE_SSH_AGENT_FORWARD */
 
 int get_devices_from_authfile(const char *authfile, const char *username,
                               unsigned max_devs, int verbose, FILE *debug_file,
@@ -549,6 +553,7 @@ char *converse(pam_handle_t *pamh, int echocode, const char *prompt) {
   return ret;
 }
 
+#ifdef ENABLE_SSH_AGENT_FORWARD
 static int send_agent_challenge(const cfg_t *cfg, const int socket_fd,
 				const char *origin, const char *challenge,
 				char **response) {
@@ -808,6 +813,7 @@ int do_agent_authentication(const char *ssh_agent_socket_name,
   
   return retval;
 }
+#endif /* ENABLE_SSH_AGENT_FORWARD */
 
 #if defined(PAM_DEBUG)
 void _debug(FILE *debug_file, const char *file, int line, const char *func, const char *fmt, ...) {

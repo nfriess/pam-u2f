@@ -2,6 +2,8 @@
  * Copyright (C) 2014-2018 Yubico AB - See COPYING
  */
 
+#include "config.h"
+
 #include <u2f-server.h>
 #include <u2f-host.h>
 
@@ -10,26 +12,31 @@
 #define TIMEOUT 15
 #define FREQUENCY 1
 
-#define AGENT_BUF_LEN             4096
-#define SSH_REQUEST_U2F_REGISTER  40
-#define SSH_AGENT_FAILURE         5
-#define SSH_AGENT_SUCCESS         6
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <pwd.h>
+
+#ifdef ENABLE_SSH_AGENT_FORWARD
+#define AGENT_BUF_LEN             4096
+#define SSH_REQUEST_U2F_REGISTER  40
+#define SSH_AGENT_FAILURE         5
+#define SSH_AGENT_SUCCESS         6
+
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <arpa/inet.h>
-#include <pwd.h>
+#endif /* ENABLE_SSH_AGENT_FORWARD */
 
 #include "cmdline.h"
 
 void do_local(u2fs_ctx_t *ctx, struct gengetopt_args_info *args_info, char *origin, char **response);
+#ifdef ENABLE_SSH_AGENT_FORWARD
 void do_ssh_agent(char *ssh_agent_socket_name, u2fs_ctx_t *ctx, char *origin, char **response);
+#endif
 
 int main(int argc, char *argv[]) {
   int exit_code = EXIT_FAILURE;
@@ -42,7 +49,9 @@ int main(int argc, char *argv[]) {
   char *origin = NULL;
   char *appid = NULL;
   char *user = NULL;
+#ifdef ENABLE_SSH_AGENT_FORWARD
   char *ssh_agent_socket_name = NULL;
+#endif
   struct passwd *passwd;
   const char *kh = NULL;
   const char *pk = NULL;
@@ -122,6 +131,7 @@ int main(int argc, char *argv[]) {
     user = passwd->pw_name;
   }
 
+#ifdef ENABLE_SSH_AGENT_FORWARD
   // Use SSH agent if defined
   ssh_agent_socket_name = getenv("SSH_AUTH_SOCK");
   
@@ -129,8 +139,11 @@ int main(int argc, char *argv[]) {
     do_ssh_agent(ssh_agent_socket_name, ctx, origin, &response);
   }
   else {
+#endif
     do_local(ctx, &args_info, origin, &response);
+#ifdef ENABLE_SSH_AGENT_FORWARD
   }
+#endif
   
   s_rc = u2fs_registration_verify(ctx, response, &reg_result);
   if (s_rc != U2FS_OK) {
@@ -234,6 +247,7 @@ void do_local(u2fs_ctx_t *ctx, struct gengetopt_args_info *args_info,
   
 }
 
+#ifdef ENABLE_SSH_AGENT_FORWARD
 void do_ssh_agent(char *ssh_agent_socket_name, u2fs_ctx_t *ctx, char *origin, char **response) {
 
   int socket_fd;
@@ -374,3 +388,4 @@ void do_ssh_agent(char *ssh_agent_socket_name, u2fs_ctx_t *ctx, char *origin, ch
   close(socket_fd);
 
 }
+#endif
