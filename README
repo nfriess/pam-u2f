@@ -225,3 +225,12 @@ authentication against them is attempted sequentially as they are defined
 in the configuration file of the module. If during an authentication
 attempt a connected device is removed or a new device is plugged in,
 the authentication restarts from the top of the list.
+
+SSH Agent Support
+-----------------
+
+This fork has an experimental implementation of passing U2F registration
+and authentication requests through an SSH Agent.  This will allow programs
+running on a remote system to use your U2F device that is plugged in locally.
+One possible use case is to require your U2F device to be able to run sudo
+on a remote system.
